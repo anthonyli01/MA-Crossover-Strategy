@@ -1,0 +1,207 @@
+---
+title: |
+  | Applications of R for Finance
+  | Course Project
+author: |
+  | Anthony Li
+  | CID: 02308277
+  | Business School, Imperial College London
+date: "16-11-2022"
+output: pdf_document
+---
+
+\newpage
+\tableofcontents
+\listoffigures
+\listoftables
+\newpage
+
+In this assignment, we will load data from the file `compustat_sec_2019_2022.csv`,
+which contains stock data for a large number of different companies.
+
+I will be calculating and presenting the daily returns and the max monthly returns.
+The September 2019 returns will be categorised into decile groups with the top 
+decile group (top 10%) in September 2019 presented in a table.
+
+The stock "NBCC (INDIA) LTD 01W" will be selected from the original data and a 
+simple trading strategy will be applied to this stock. I will apply a Moving 
+Average Crossover Strategy with the functions uploaded from a separate .R script. 
+I will backtest this strategy 
+
+## Load R packages
+
+```{r Load libraries, message=FALSE, warning=FALSE}
+library(knitr)
+library(dplyr)
+library(lubridate)
+library(xts)
+library(data.table)
+library(dtplyr)
+library(ggplot2)
+library(PerformanceAnalytics)
+
+# Importing another .R file which contains functions I will be using
+source("rfun.R")
+```
+
+## Load and prepare data
+
+We load and display the dataset as follows:
+
+Load the entire dataset from `compustat_sec_2019_2022.csv`
+```{r Load dataset}
+# Loading data using fread which is much faster compared to read.csv hence should
+# be used for large datasets. However, the result would be a table datatype rather
+# than a data frame.
+big_data <- fread("compustat_sec_2019_2022.csv", drop = c("sic", "exchg"))
+
+# Displaying first 6 rows
+head(big_data)
+```
+
+## Calculate daily returns
+We use the lagged proceeds (prccd) in order to calculate daily returns of each stock 
+in the dataset. I have defined the function to calculate returns in the rfun.R file.
+```{r Daily Ret}
+# I am applying pipe operators to modify the data. I have used the dtplyr so that
+# I can apply the normal pipe operators to the data table datatype.
+data <- big_data %>% 
+  group_by(conm, iid) %>% 
+  mutate(returns = simple_daily_return(prccd) ) %>% 
+  ungroup() %>%
+  as.data.table()
+
+head(data)
+
+
+```
+
+## Calculate maximum daily returns for each month
+We extract the month from each date using the floor_date() function and store it 
+in a new column called return_month. We then look for the maximum daily returns 
+for each month and store them in a new column called max_return. We only keep the 
+rows where the maximum daily return is equal to the daily return. 
+
+**Store the maximum daily returns in a new column called `max_return`**
+```{r Maximum daily returns}
+# Converting the datatype of datadate from Integer to Date
+data$datadate <- as.Date(as.character(data$datadate), format = "%Y%m%d")
+
+# Extract the month from each date using floor_date(), and store in a new column
+data$return_month <- floor_date(data$datadate, unit = "month", 
+                                week_start = getOption("lubridate.week.start",7))
+
+# Create a new column named max_return with the maximum daily returns each month
+max_daily_return <- data  %>%
+  group_by(return_month, gvkey, iid, conm) %>%
+  filter(is.finite(returns)) %>%
+  mutate(max_return = max(returns, na.rm = TRUE) ) %>%
+  ungroup() %>%
+  as.data.table()
+  
+# Keep only the rows where the maximum daily return matches the daily return
+max_daily_return.uni <- 
+  max_daily_return[max_daily_return$returns == max_daily_return$max_return ,]
+
+max_daily_return.uni1 <- max_daily_return.uni[!duplicated(max_daily_return.uni
+[,c("return_month", "max_return", "iid", "conm", "gvkey")]), ]
+
+```
+
+```{r}
+# Displaying max monthly returns for first 6 months
+knitr::kable(
+  head(max_daily_return.uni1), booktabs = TRUE,
+  caption = 'Maximum monthly returns'
+)
+```
+
+
+## Categorise into decile groups
+Having obtained the maximum daily returns, we take a subset made up of the 
+September 2019 maximum daily returns and we categorise them into decile groups 
+using the cut() function.
+
+**Categorise into deciles in a new column called `decile_cat`**
+```{r Deciles}
+# Extract a subset of the maximum daily returns (September 2019)
+data_Sep2019 <- max_daily_return.uni1  %>% 
+  filter(return_month=="2019-09-01") %>%
+  as.data.table()
+
+
+# Categorise into decile groups in a new column named decile_cat
+data_Sep2019$decile_cat <- as.character(cut(data_Sep2019$returns,
+                            quantile(data_Sep2019$returns, 
+                            probs = seq(0,1, length = 11), na.rm = T, type = 5), 
+                            include.lowest = TRUE, labels = c("10%", "20%", "30%"
+                            ,"40%", "50%", "60%", "70%", "80%", "90%", "100%" )))
+
+top_decile_group <- data_Sep2019[data_Sep2019$decile_cat == "100%",]
+```
+
+### Presenting the top 10% decile group (i.e. the 100% decile group)
+
+```{r Choose stocks}
+# Display in the final render
+knitr::kable(
+  head(top_decile_group), booktabs = TRUE,
+  caption = 'Top 10% decile group in Sep 2019.'
+)
+```
+## Extracting data for "NBCC (INDIA) LTD"
+
+```{r Extracting Stock}
+NBCC <- big_data %>%
+  filter(conm == "NBCC (INDIA) LTD", iid == "01W") %>%
+  as.data.frame() 
+
+NBCC$datadate <- as.Date(as.character(NBCC$datadate), format = "%Y%m%d")
+
+```
+
+
+
+## Implementing Moving Average Crossover Strategy
+
+```{r Trading Strategy}
+NBCC.ts <- xts(NBCC$prccd, order.by = NBCC$datadate)
+colnames(NBCC.ts) <- "NBCC"
+
+
+# Using movingAvg function in the rfun.R script to calculate MA 
+MA_100 <- movingAvg(NBCC.ts, 100)
+MA_20 <- movingAvg(NBCC.ts, 20)
+
+# Obtaining the a buy or sell signal depending on whether the short term MA has
+# crossed the long term MA from above or below
+signal <- sign(MA_20-MA_100)
+
+# No moving average for first n observations where n is the long term MA length
+signal[is.na(signal)] <- 0
+
+# Plotting graph of the Moving Averages and the stock price
+ggplot()+
+  geom_line(NBCC, mapping = aes(x=datadate ,y=prccd, color="Stock Price"))+
+  geom_line(NBCC, mapping = aes(x=datadate ,y=MA_100, color="Slow MA"))+
+  geom_line(NBCC, mapping = aes(x=datadate ,y=MA_20, color="Fast MA"))+
+  geom_line()+
+  ggtitle("NBCC (INDIA) LTD 01W Share price") +
+  ylab("Share Price") +
+  xlab("Date") +
+  scale_color_manual(name = c("Price", "Slow MA", "Fast MA"), 
+      values = c("Stock Price" = "blue", "Slow MA" = "red", "Fast MA" = "green"))
+
+
+results <- simpleBacktest(NBCC.ts, signal)
+
+charts.PerformanceSummary(results)
+```
+## Analysis
+
+The cumulative returns seem to be very volatile and occasionally reaches below 0.
+However, the period ends with a positive cumulative return showing that the strategy
+is profitable. 
+
+
+
